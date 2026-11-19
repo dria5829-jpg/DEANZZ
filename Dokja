@@ -1,0 +1,106 @@
+// NAME: Mangasusuku
+// TYPE: comic
+// VERSION: 2.0.1
+// COLOR: #FF2D55
+// ICON: https://mangasusuku.com/favicon.ico
+// REFERER: https://mangasusuku.com/
+
+const BASE = 'https://mangasusuku.com';
+const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+    'Referer': 'https://mangasusuku.com/',
+};
+
+async function fetchHtml(url) {
+    const res = await fetch(url, { headers });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+}
+
+function extractMatch(regex, str, defaultVal = '') {
+    const m = str.match(regex);
+    return m ? m[1].trim() : defaultVal;
+}
+
+function extractAll(regex, str) {
+    const matches = [];
+    let m;
+    while ((m = regex.exec(str)) !== null) matches.push(m);
+    return matches;
+}
+
+KonmikExtension = {
+    async getList(page, query, filters) {
+        // Search tetep pakai ?s=
+        let url = query
+            ? `${BASE}/page/${page}/?s=${encodeURIComponent(query)}`
+            : `${BASE}/manga-list/page/${page}/`;
+
+        let html = await fetchHtml(url);
+        let matches = extractAll(/<div class="bs"[^>]*>[\s\S]*?<a href="([^"]+)"[^>]*>[\s\S]*?<img[^>]*(?:data-src|src)="([^"]+)"[^>]*>[\s\S]*?<div class="tt">([^<]+)<\/div>/gi, html);
+
+        // Kalau manga-list kosong, fallback ke homepage (cara lama yang udah bisa)
+        if (matches.length === 0) {
+            html = await fetchHtml(`${BASE}/page/${page}/`);
+            matches = extractAll(/<div class="bs"[^>]*>[\s\S]*?<a href="([^"]+)"[^>]*>[\s\S]*?<img[^>]*(?:data-src|src)="([^"]+)"[^>]*>[\s\S]*?<div class="tt">([^<]+)<\/div>/gi, html);
+        }
+        if (matches.length === 0) {
+            matches = extractAll(/<a href="([^"]*\/manga\/[^"]*)"[^>]*>[\s\S]{0,500}?(?:data-src|src)="([^"]+)"[\s\S]{0,500}?>([^<]{3,80})</gi, html);
+        }
+
+        const mangaList = [];
+        const seen = new Set();
+        for (const m of matches) {
+            const urlPath = m[1];
+            let cover = m[2];
+            const title = (m[3] || '').trim();
+            if (!urlPath || !title) continue;
+            if (seen.has(urlPath)) continue;
+            seen.add(urlPath);
+            if (cover.includes('?')) cover = cover.split('?')[0];
+            if (cover.includes('logo') || cover.includes('placeholder')) continue;
+            mangaList.push({ id: urlPath, title: title, cover_url: cover, rating: '-', views: '-' });
+        }
+        return { manga_list: mangaList, has_next_page: mangaList.length > 0 };
+    },
+
+    async getDetail(urlPath) {
+        const html = await fetchHtml(urlPath);
+        const title = extractMatch(/<h1[^>]*>([^<]+)<\/h1>/i, html, 'Unknown Title');
+        const author = extractMatch(/Author[\s\S]{0,120}?<a[^>]*>([^<]+)<\/a>/i, html, 'Mangasusuku').trim();
+        const desc = extractMatch(/<div class="sinopsis"[^>]*>([\s\S]*?)<\/div>/i, html) || extractMatch(/<div class="desc"[^>]*>([\s\S]*?)<\/div>/i, html, 'Tidak ada deskripsi.');
+        const cleanDesc = desc.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+        let cover = extractMatch(/property="og:image"[^>]*content="([^"]+)"/i, html) || extractMatch(/content="([^"]+)"[^>]*property="og:image"/i, html);
+        if (cover && cover.includes('?')) cover = cover.split('?')[0];
+        const genreMatches = extractAll(/<a[^>]*rel="tag"[^>]*>([^<]+)<\/a>/gi, html);
+        let genres = genreMatches.map(m => m[1].trim()).filter(Boolean);
+        if (genres.length === 0) genres = ['Manga'];
+        let matches = extractAll(/<a href="([^"]+)"[^>]*>[\s\S]{0,200}?<span class="chapternum">([^<]+)<\/span>/g, html);
+        const chapters = [];
+        for (const m of matches) chapters.push({ id: m[1], title: (m[2] || '').trim(), date: '-' });
+        if (chapters.length === 0) chapters.push({ id: urlPath, title: title, date: '-' });
+        return { title: title, cover_url: cover, description: cleanDesc || 'Tidak ada deskripsi.', rating: '-', views: '-', genres: genres, author: author || 'Mangasusuku', artist: author || 'Mangasusuku', chapters: chapters };
+    },
+
+    async getChapterImages(viewerUrl) {
+        const html = await fetchHtml(viewerUrl);
+        let listHtml = extractMatch(/<div[^>]*id="readerarea"[^>]*>([\s\S]*?)<\/div>\s*<div/i, html);
+        if (!listHtml) listHtml = extractMatch(/<div class="entry-content"[^>]*>([\s\S]*?)<\/div>\s*<div/i, html);
+        if (!listHtml) listHtml = html;
+        let matches = extractAll(/data-src="([^"]+)"/g, listHtml);
+        if (matches.length === 0) matches = extractAll(/<img[^>]*src="([^"]+)"/g, listHtml);
+        const images = [];
+        const seenImg = new Set();
+        for (const m of matches) {
+            const img = m[1];
+            if (!img || img.includes('logo') || img.includes('placeholder') || img.includes('banner') || img.includes('avatar')) continue;
+            if (seenImg.has(img)) continue;
+            seenImg.add(img);
+            images.push(img);
+        }
+        return images;
+    }
+};
+
+if (typeof globalThis !== 'undefined') globalThis.KonmikExtension = KonmikExtension;
+if (typeof self !== 'undefined') self.KonmikExtension = KonmikExtension;
