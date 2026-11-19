@@ -1,0 +1,303 @@
+/*
+ * ID: doujin-desu
+ * NAME: Doujin Desu
+ * TYPE: comic
+ * VERSION: 1.0.0
+ * COLOR: #e91e63
+ * ICON: https://doujin.desu.xxx/favicon.ico
+ * REFERER: https://doujin.desu.xxx/
+ */
+
+var KonmikExtension = (function () {
+  "use strict";
+
+  var BASE_URL = "https://doujin.desu.xxx/";
+  var REFERER = BASE_URL;
+
+  function decodeEntities(value) {
+    return String(value || "")
+      .replace(/&nbsp;|&#160;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&#(\d+);/g, function (_, code) {
+        return String.fromCharCode(Number(code));
+      })
+      .replace(/&#x([0-9a-f]+);/gi, function (_, code) {
+        return String.fromCharCode(parseInt(code, 16));
+      });
+  }
+
+  function stripTags(value) {
+    return decodeEntities(String(value || "")
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ")
+      .replace(/<[^>]*>/g, " "))
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function getAttribute(tag, name) {
+    var escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    var match = tag.match(new RegExp(
+      "\\b" + escaped + "\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))",
+      "i"
+    ));
+    return match ? decodeEntities(match[1] || match[2] || match[3] || "") : "";
+  }
+
+  function resolveUrl(href, base) {
+    href = decodeEntities(String(href || "").trim());
+    if (!href || /^(?:javascript:|data:|mailto:|#)/i.test(href)) return "";
+    if (/^https?:\/\//i.test(href)) return href;
+    if (href.slice(0, 2) === "//") return "https:" + href;
+
+    var originMatch = String(base || BASE_URL).match(/^(https?:\/\/[^/]+)/i);
+    var origin = originMatch ? originMatch[1] : BASE_URL.replace(/\/$/, "");
+
+    if (href.charAt(0) === "/") return origin + href;
+
+    var basePath = String(base || BASE_URL).split(/[?#]/)[0];
+    var directory = basePath.slice(0, basePath.lastIndexOf("/") + 1);
+    var combined = directory + href;
+    var parts = combined.split("/");
+    var normalized = [];
+
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i] === "..") {
+        if (normalized.length > 3) normalized.pop();
+      } else if (parts[i] !== "." || i < 3) {
+        normalized.push(parts[i]);
+      }
+    }
+    return normalized.join("/");
+  }
+
+  async function fetchHtml(url) {
+    var response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Referer": REFERER,
+        "User-Agent": "Mozilla/5.0"
+      }
+    });
+
+    if (!response || (response.ok === false)) {
+      throw new Error("Gagal mengambil halaman: " + url);
+    }
+    return await response.text();
+  }
+
+  function getAnchors(html) {
+    var results = [];
+    var regex = /<a\b[^>]*href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a\s*>/gi;
+    var match;
+
+    while ((match = regex.exec(html)) !== null) {
+      results.push({
+        href: decodeEntities(match[1] || match[2] || match[3] || ""),
+        inner: match[4] || "",
+        index: match.index
+      });
+    }
+    return results;
+  }
+
+  function getImageFromHtml(html) {
+    var match = html.match(/<img\b[^>]*>/i);
+    if (!match) return "";
+
+    var tag = match[0];
+    return getAttribute(tag, "data-src") ||
+      getAttribute(tag, "data-lazy-src") ||
+      getAttribute(tag, "src") ||
+      getAttribute(tag, "srcset").split(",")[0].trim().split(/\s+/)[0] ||
+      "";
+  }
+
+  function getChapterNumber(text) {
+    var match = String(text || "").match(
+      /(?:chapter|chap|ch|bab|episode|ep)\s*[-.#:]?\s*(\d+(?:\.\d+)?)/i
+    );
+    if (!match) match = String(text || "").match(/(\d+(?:\.\d+)?)/);
+    return match ? Number(match[1]) : Number.POSITIVE_INFINITY;
+  }
+
+  function sortChapters(chapters) {
+    return chapters
+      .map(function (chapter, index) {
+        chapter._originalIndex = index;
+        chapter._sortNumber = getChapterNumber(chapter.title);
+        return chapter;
+      })
+      .sort(function (a, b) {
+        if (a._sortNumber !== b._sortNumber) {
+          return a._sortNumber - b._sortNumber;
+        }
+        return a._originalIndex - b._originalIndex;
+      })
+      .map(function (chapter) {
+        delete chapter._originalIndex;
+        delete chapter._sortNumber;
+        return chapter;
+      });
+  }
+
+  async function getList(page) {
+    var pageNumber = Math.max(1, Number(page) || 1);
+    var url = pageNumber === 1
+      ? resolveUrl("/manga/", BASE_URL)
+      : resolveUrl("/manga/page/" + pageNumber + "/", BASE_URL);
+
+    var html = await fetchHtml(url);
+    var anchors = getAnchors(html);
+    var items = [];
+    var seen = {};
+
+    anchors.forEach(function (anchor) {
+      if (!/<img\b/i.test(anchor.inner)) return;
+
+      var itemUrl = resolveUrl(anchor.href, url);
+      if (!itemUrl || seen[itemUrl]) return;
+
+      var image = getImageFromHtml(anchor.inner);
+      var title = stripTags(anchor.inner);
+
+      if (!title) {
+        var nearby = html.slice(
+          Math.max(0, anchor.index - 700),
+          Math.min(html.length, anchor.index + 1400)
+        );
+        var titleMatch = nearby.match(
+          /class\s*=\s*["'][^"']*(?:c-title|post-title|entry-title)[^"']*["'][^>]*>([\s\S]*?)<\/(?:div|h\d|span)\s*>/i
+        );
+        title = titleMatch ? stripTags(titleMatch[1]) : "";
+      }
+
+      var imageTag = anchor.inner.match(/<img\b[^>]*>/i);
+      if (!title && imageTag) {
+        title = getAttribute(imageTag[0], "alt") ||
+          getAttribute(imageTag[0], "title");
+      }
+
+      if (!title) return;
+
+      seen[itemUrl] = true;
+      items.push({
+        title: title,
+        url: itemUrl,
+        cover: image ? resolveUrl(image, url) : ""
+      });
+    });
+
+    return items;
+  }
+
+  async function getDetail(url) {
+    var detailUrl = resolveUrl(url, BASE_URL);
+    var html = await fetchHtml(detailUrl);
+
+    var titleMatch = html.match(
+      /<h1\b[^>]*class\s*=\s*["'][^"']*post-title[^"']*["'][^>]*>([\s\S]*?)<\/h1\s*>/i
+    );
+    if (!titleMatch) {
+      titleMatch = html.match(/<meta\b[^>]*property=["']og:title["'][^>]*>/i);
+    }
+
+    var title = titleMatch
+      ? (titleMatch[1] ? stripTags(titleMatch[1]) : getAttribute(titleMatch[0], "content"))
+      : "";
+
+    var cover = "";
+    var coverTag = html.match(/<meta\b[^>]*property=["']og:image["'][^>]*>/i);
+    if (coverTag) cover = getAttribute(coverTag[0], "content");
+    if (!cover) {
+      var coverArea = html.match(/class\s*=\s*["'][^"']*summary_image[^"']*["'][\s\S]{0,2500}/i);
+      if (coverArea) cover = getImageFromHtml(coverArea[0]);
+    }
+
+    var description = "";
+    var descriptionMatch = html.match(
+      /class\s*=\s*["'][^"']*description-summary[^"']*["'][^>]*>([\s\S]*?)<\/div\s*>/i
+    );
+    if (descriptionMatch) description = stripTags(descriptionMatch[1]);
+
+    var author = "";
+    var authorMatch = html.match(
+      /class\s*=\s*["'][^"']*(?:author|artist)[^"']*["'][^>]*>([\s\S]*?)<\/(?:a|span|div)\s*>/i
+    );
+    if (authorMatch) author = stripTags(authorMatch[1]);
+
+    var chapterAreaMatch = html.match(
+      /class\s*=\s*["'][^"']*listing-chapters_wrap[^"']*["'][^>]*>([\s\S]*?)<\/(?:div|section)\s*>/i
+    );
+    var chapterArea = chapterAreaMatch ? chapterAreaMatch[1] : html;
+    var anchors = getAnchors(chapterArea);
+    var chapters = [];
+    var seen = {};
+
+    anchors.forEach(function (anchor) {
+      var chapterUrl = resolveUrl(anchor.href, detailUrl);
+      var chapterTitle = stripTags(anchor.inner);
+      if (!chapterUrl || !chapterTitle || seen[chapterUrl]) return;
+
+      var path = chapterUrl.split(/[?#]/)[0].replace(/\/+$/, "");
+      var detailPath = detailUrl.split(/[?#]/)[0].replace(/\/+$/, "");
+      var looksLikeChapter =
+        /(?:chapter|chap|bab|episode|ep)[-_./ ]*\d*/i.test(path + " " + chapterTitle) ||
+        (path.indexOf(detailPath + "/") === 0 &&
+          path.slice(detailPath.length + 1).indexOf("/") === -1);
+
+      if (!looksLikeChapter || chapterUrl === detailUrl) return;
+
+      seen[chapterUrl] = true;
+      chapters.push({ title: chapterTitle, url: chapterUrl });
+    });
+
+    return {
+      title: title,
+      url: detailUrl,
+      cover: cover ? resolveUrl(cover, detailUrl) : "",
+      author: author,
+      description: description,
+      chapters: sortChapters(chapters)
+    };
+  }
+
+  async function getChapterImages(url) {
+    var chapterUrl = resolveUrl(url, BASE_URL);
+    var html = await fetchHtml(chapterUrl);
+    var readerMatch = html.match(
+      /<(?:div|section)\b[^>]*(?:id\s*=\s*["']readerarea["']|class\s*=\s*["'][^"']*(?:reading-content|readerarea)[^"']*["'])[^>]*>([\s\S]*?)<\/(?:div|section)\s*>/i
+    );
+    var source = readerMatch ? readerMatch[1] : html;
+    var tags = source.match(/<img\b[^>]*>/gi) || [];
+    var images = [];
+    var seen = {};
+
+    tags.forEach(function (tag) {
+      var src = getAttribute(tag, "data-src") ||
+        getAttribute(tag, "data-lazy-src") ||
+        getAttribute(tag, "data-original") ||
+        getAttribute(tag, "src");
+
+      if (!src || /^data:/i.test(src)) return;
+
+      src = resolveUrl(src, chapterUrl);
+      if (!src || seen[src]) return;
+
+      seen[src] = true;
+      images.push(src);
+    });
+
+    return images;
+  }
+
+  return {
+    getList: getList,
+    getDetail: getDetail,
+    getChapterImages: getChapterImages
+  };
+})();
