@@ -1,0 +1,137 @@
+// ID: ext_doujindesu_id
+// NAME: Doujindesu
+// TYPE: comic
+// VERSION: 1.0.0
+// COLOR: #FF5722
+// ICON: https://doujin.desu.xxx/favicon.ico
+// REFERER: https://doujin.desu.xxx/
+
+const BASE = 'https://doujin.desu.xxx';
+const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+    'Referer': 'https://doujin.desu.xxx/',
+};
+
+async function fetchHtml(url) {
+    const res = await fetch(url, { headers });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+}
+
+function extractMatch(regex, str, defaultVal = '') {
+    const m = str.match(regex);
+    return m ? m[1].trim() : defaultVal;
+}
+
+function extractAll(regex, str) {
+    const matches = [];
+    let m;
+    while ((m = regex.exec(str)) !== null) {
+        matches.push(m);
+    }
+    return matches;
+}
+
+var KonmikExtension = {
+    async getList(page, query, filters) {
+        // Menyesuaikan pola URL pencarian atau halaman utama (*archive/manga list*)
+        let url = query 
+            ? `${BASE}/?s=${encodeURIComponent(query)}` 
+            : `${BASE}/manga/?page=${page}`;
+            
+        const html = await fetchHtml(url);
+        
+        // Regex untuk menangkap card komik pada umumnya di platform berbasis WordPress/Desu
+        const cardRegex = /<article[^>]*>[\s\S]*?<a[^>]*href="([^"]+)"[^>]*>[\s\S]*?<img[^>]*src="([^"]+)"[^>]*>[\s\S]*?<h2[^>]*>([^<]+)<\/h2>/gi;
+        
+        const mangaList = [];
+        const matches = extractAll(cardRegex, html);
+        const seen = new Set();
+        
+        for (const m of matches) {
+            const urlPath = m[1];
+            let cover = m[2];
+            const title = m[3];
+            
+            if (seen.has(urlPath)) continue;
+            seen.add(urlPath);
+            
+            if (cover.includes('?')) cover = cover.split('?')[0];
+            
+            mangaList.push({
+                id: urlPath,
+                title: title.trim(),
+                cover_url: cover,
+                rating: '-',
+                views: '-'
+            });
+        }
+        return { manga_list: mangaList };
+    },
+
+    async getDetail(urlPath) {
+        const html = await fetchHtml(urlPath);
+        
+        const title = extractMatch(/<h1 class="entry-title"[^>]*>([^<]+)<\/h1>/i, html, 'Unknown Title');
+        const author = extractMatch(/<strong>Author:<\/strong>\s*<span>([^<]+)<\/span>/i, html, 'Kreator').trim();
+        const desc = extractMatch(/<div class="entry-content">([\s\S]*?)<\/div>/i, html, 'Tidak ada deskripsi.').replace(/<[^>]+>/g, '').trim();
+        
+        // Ekstraksi genre
+        const genreRegex = /<a[^>]*rel="tag"[^>]*>([^<]+)<\/a>/g;
+        const genreMatches = extractAll(genreRegex, html);
+        const genres = genreMatches.map(g => g[1].trim());
+
+        let cover = extractMatch(/property="og:image"[\s\S]*?content="([^"]+)"/i, html);
+        if (cover.includes('?')) cover = cover.split('?')[0];
+        
+        // Regex untuk mengambil daftar chapter (biasanya berupa list link di bawah detail)
+        const chapterRegex = /<li>[\s\S]*?<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)(?:<span[^>]*class="date">([^<]+)<\/span>)?<\/a>/g;
+        const matches = extractAll(chapterRegex, html);
+        
+        const chapters = [];
+        for (const m of matches) {
+            const chUrl = m[1];
+            // Membersihkan tag HTML di dalam judul chapter jika ada
+            const chTitle = m[2].replace(/<[^>]+>/g, '').trim();
+            const chDate = m[3] ? m[3].trim() : '-';
+            
+            chapters.push({
+                id: chUrl,
+                title: chTitle || 'Chapter',
+                date: chDate
+            });
+        }
+        
+        return {
+            title: title,
+            cover_url: cover,
+            description: desc,
+            rating: '-',
+            views: '-',
+            genres: genres.length > 0 ? genres : ['Doujinshi'],
+            author: author || 'Kreator',
+            artist: author || 'Kreator',
+            chapters: chapters
+        };
+    },
+
+    async getChapterImages(viewerUrl) {
+        const html = await fetchHtml(viewerUrl);
+        
+        // Penyesuaian container pembaca gambar (biasanya dibungkus div dengan kelas reading-content atau serupa)
+        const listHtml = extractMatch(/<div class="reading-content"[\s\S]*?>([\s\S]*?)<\/div>/i, html) || html;
+        
+        const imgRegex = /<img[^>]*src="([^"]+)"/g;
+        const matches = extractAll(imgRegex, listHtml);
+        
+        const images = [];
+        for (const m of matches) {
+            const imgUrl = m[1];
+            // Filter gambar yang tidak relevan (seperti ikon, avatar, atau banner iklan)
+            if (!imgUrl.includes('avatar') && !imgUrl.includes('logo') && !images.includes(imgUrl)) {
+                images.push(imgUrl);
+            }
+        }
+        return images;
+    }
+};
